@@ -695,6 +695,13 @@ class ApodCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._config = {};
     this._hass = null;
+    this._imageViewer = null;
+    this._imageViewerKeyHandler = null;
+    this._previousBodyOverflow = "";
+  }
+
+  disconnectedCallback() {
+    this._closeImageViewer();
   }
 
   static getConfigElement() { return document.createElement("apod-card-editor"); }
@@ -809,6 +816,7 @@ class ApodCard extends HTMLElement {
           border: 0;
           object-fit: contain;
         }
+        .apod-media img { cursor: zoom-in; }
         .apod-overlay {
           position: absolute;
           inset: auto 0 0 0;
@@ -871,6 +879,67 @@ class ApodCard extends HTMLElement {
         </div>
       </ha-card>
     `;
+
+    const apodImage = this.shadowRoot.querySelector(".apod-media img");
+    if (apodImage) {
+      apodImage.addEventListener("click", () => this._openImageViewer(hdurl || url, mediaTitle));
+    }
+  }
+
+  _openImageViewer(imageUrl, title) {
+    if (!imageUrl) return;
+    this._closeImageViewer();
+
+    const overlay = document.createElement("div");
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", title || "APOD image");
+    overlay.style.cssText = `
+      position: fixed; inset: 0; z-index: 999999; display: flex;
+      align-items: center; justify-content: center; box-sizing: border-box;
+      padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+      background: rgba(0, 0, 0, 0.94); cursor: zoom-out;
+    `;
+
+    const image = document.createElement("img");
+    image.src = imageUrl;
+    image.alt = title || "APOD image";
+    image.style.cssText = `display: block; max-width: 96vw; max-height: 94vh; width: auto; height: auto; object-fit: contain; cursor: default; box-shadow: 0 8px 40px rgba(0,0,0,.5);`;
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.textContent = "×";
+    closeButton.setAttribute("aria-label", "Close image");
+    closeButton.style.cssText = `position: absolute; top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); display: grid; place-items: center; width: 48px; height: 48px; padding: 0; border: 1px solid rgba(255,255,255,.28); border-radius: 50%; color: #fff; background: rgba(40,40,40,.72); font: 32px/1 sans-serif; cursor: pointer;`;
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) this._closeImageViewer();
+    });
+    image.addEventListener("click", (event) => event.stopPropagation());
+    closeButton.addEventListener("click", () => this._closeImageViewer());
+    this._imageViewerKeyHandler = (event) => {
+      if (event.key === "Escape") this._closeImageViewer();
+    };
+    window.addEventListener("keydown", this._imageViewerKeyHandler);
+
+    overlay.append(image, closeButton);
+    this._imageViewer = overlay;
+    this._previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.body.append(overlay);
+    closeButton.focus();
+  }
+
+  _closeImageViewer() {
+    if (this._imageViewer) {
+      this._imageViewer.remove();
+      this._imageViewer = null;
+      document.body.style.overflow = this._previousBodyOverflow;
+    }
+    if (this._imageViewerKeyHandler) {
+      window.removeEventListener("keydown", this._imageViewerKeyHandler);
+      this._imageViewerKeyHandler = null;
+    }
   }
 
   getCardSize() { return 6; }
@@ -2702,6 +2771,9 @@ class EarthObservationCard extends HTMLElement {
     this._defaultApplied = false;
     this._refreshHandle = 0;
     this._refreshToken = Date.now();
+    this._imageViewer = null;
+    this._imageViewerKeyHandler = null;
+    this._previousBodyOverflow = "";
   }
 
   static getConfigElement() { return document.createElement("earth-observation-card-editor"); }
@@ -2731,6 +2803,7 @@ class EarthObservationCard extends HTMLElement {
       clearInterval(this._refreshHandle);
       this._refreshHandle = 0;
     }
+    this._closeImageViewer();
   }
 
   setConfig(config) {
@@ -2758,7 +2831,9 @@ class EarthObservationCard extends HTMLElement {
       { key: "meteosat", title: "Meteosat-12", group: "earth", entityId: this._config.meteosat_entity, enabled: true, fallbackSource: "EUMETSAT / NASA", fallbackDetail: "GeoColour RGB full-disc imagery of Europe and Africa." },
       { key: "sdo", title: "SDO", group: "sun", entityId: this._config.sdo_entity, enabled: true, fallbackSource: "NASA SDO", fallbackDetail: "Solar Dynamics Observatory imagery." },
       { key: "soho", title: "SOHO", group: "sun", entityId: this._config.soho_entity, enabled: true, fallbackSource: "ESA/NASA SOHO", fallbackDetail: "Solar coronagraph imagery." },
-    ].filter((view) => view.enabled && view.entityId && (!this._hass || getState(this._hass, view.entityId)));
+      { key: "sdo_hmi", title: "SDO HMI", group: "sun", directImage: "l_HMI_cont_aiascale.jpg", enabled: true, fallbackSource: "NASA SDO / LMSAL", fallbackDetail: "HMI continuum image of the visible solar surface." },
+      { key: "sdo_304", title: "SDO AIA 304", group: "sun", directImage: "l0304.jpg", enabled: true, fallbackSource: "NASA SDO / LMSAL", fallbackDetail: "AIA 304 Å image showing structures in the solar atmosphere." },
+    ].filter((view) => view.enabled && (view.directImage || (view.entityId && (!this._hass || getState(this._hass, view.entityId)))));
   }
 
   _selectDefaultView() {
@@ -2787,7 +2862,27 @@ class EarthObservationCard extends HTMLElement {
     return `/api/camera_proxy/${entityId}?t=${this._refreshToken}`;
   }
 
+  _getCurrentDatePath() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    return `${year}/${month}/${day}`;
+  }
+
   _getViewData(view) {
+    if (view.directImage) {
+      const datePath = this._getCurrentDatePath();
+      const imageUrl = `https://suntoday.lmsal.com/sdomedia/SunInTime/${datePath}/${view.directImage}?t=${this._refreshToken}`;
+      return {
+        ...view,
+        stateObj: null,
+        imageUrl,
+        source: view.fallbackSource,
+        headline: `Latest daily image · ${datePath.replaceAll("/", "-")}`,
+        detail: view.fallbackDetail,
+      };
+    }
     const stateObj = getState(this._hass, view.entityId);
     if (!stateObj) return null;
     const attrs = stateObj.attributes || {};
@@ -2799,6 +2894,92 @@ class EarthObservationCard extends HTMLElement {
       headline: formatDateTime(attrs.date || attrs.timestamp || stateObj.last_updated || stateObj.last_changed),
       detail: attrs.caption || attrs.description || attrs.summary || attrs.sector || attrs.view || view.fallbackDetail,
     };
+  }
+
+  _openImageViewer(imageUrl, title) {
+    this._closeImageViewer();
+
+    const overlay = document.createElement("div");
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", title);
+    overlay.style.cssText = `
+      position: fixed;
+      inset: 0;
+      z-index: 999999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+      background: rgba(0, 0, 0, 0.94);
+      cursor: zoom-out;
+    `;
+
+    const image = document.createElement("img");
+    image.src = imageUrl;
+    image.alt = title;
+    image.style.cssText = `
+      display: block;
+      max-width: 96vw;
+      max-height: 94vh;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      cursor: default;
+      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+    `;
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.textContent = "×";
+    closeButton.setAttribute("aria-label", "Close image");
+    closeButton.style.cssText = `
+      position: absolute;
+      top: max(12px, env(safe-area-inset-top));
+      right: max(12px, env(safe-area-inset-right));
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 50%;
+      color: #fff;
+      background: rgba(40, 40, 40, 0.72);
+      font: 32px/1 sans-serif;
+      cursor: pointer;
+    `;
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) this._closeImageViewer();
+    });
+    image.addEventListener("click", (event) => event.stopPropagation());
+    closeButton.addEventListener("click", () => this._closeImageViewer());
+
+    this._imageViewerKeyHandler = (event) => {
+      if (event.key === "Escape") this._closeImageViewer();
+    };
+    window.addEventListener("keydown", this._imageViewerKeyHandler);
+
+    overlay.append(image, closeButton);
+    this._imageViewer = overlay;
+    this._previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.body.append(overlay);
+    closeButton.focus();
+  }
+
+  _closeImageViewer() {
+    if (this._imageViewer) {
+      this._imageViewer.remove();
+      this._imageViewer = null;
+      document.body.style.overflow = this._previousBodyOverflow;
+    }
+    if (this._imageViewerKeyHandler) {
+      window.removeEventListener("keydown", this._imageViewerKeyHandler);
+      this._imageViewerKeyHandler = null;
+    }
   }
 
   _render() {
@@ -2882,6 +3063,7 @@ class EarthObservationCard extends HTMLElement {
           height: 100%;
           object-fit: contain;
           background: #000;
+          cursor: zoom-in;
         }
         .earth-meta { padding: 12px 2px 0; display: flex; flex-direction: column; gap: 8px; }
         .earth-headline { font-size: 0.84rem; font-weight: 700; color: ${ASTRO.text1}; }
@@ -2931,6 +3113,12 @@ class EarthObservationCard extends HTMLElement {
         this._activeView = button.dataset.view;
         this._render();
       });
+    });
+
+    const observationImage = this.shadowRoot.querySelector(".earth-frame img");
+    observationImage?.addEventListener("click", () => {
+      const imageTitle = `${active.title} ${active.group === "sun" ? "Sun" : "Earth"} observation`;
+      this._openImageViewer(active.imageUrl, imageTitle);
     });
   }
 
